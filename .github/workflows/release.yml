@@ -1,0 +1,89 @@
+name: Build region tiles
+
+# One Valhalla build of the whole extract, cut into per-region packages.
+# With publish on, the packages and index.json go out as one release,
+# tiles-<YYYYMMDD>, marked latest; the app reads
+# https://github.com/rme451/waystamp-tiles/releases/latest/download/index.json
+on:
+  workflow_dispatch:
+    inputs:
+      extract:
+        description: Geofabrik path, without -latest.osm.pbf
+        default: europe/great-britain
+      buffer_km:
+        description: Grow each region's boundary by this much before picking tiles
+        default: "2"
+      regions:
+        description: Comma-separated Geofabrik ids (empty = all English counties, Wales, Scotland)
+        default: ""
+      publish:
+        description: Publish the release (off = build and cut only, index.json as an artifact)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Standard runner only: free for public repos (4 CPUs, 16 GB RAM).
+    # Larger runners are charged even on public repos.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af > /dev/null
+          df -h /
+
+      - name: Build tiles (hierarchy off)
+        run: bash scripts/measure_build.sh "${{ inputs.extract }}" false 4 out/measure
+        env:
+          WORK_DIR: ${{ runner.temp }}/work
+
+      - name: Cut regions
+        env:
+          WORK_DIR: ${{ runner.temp }}/work
+        run: |
+          sudo apt-get install -y -qq osmium-tool > /dev/null
+          pip install -q shapely
+          BUILD=$(date -u +%Y%m%d)
+          OSM_TS=$(osmium fileinfo -g header.option.osmosis_replication_timestamp "$WORK_DIR/region.osm.pbf")
+          curl -fsSL -o "$RUNNER_TEMP/index-v1.json" https://download.geofabrik.de/index-v1.json
+          python3 scripts/cut_regions.py \
+            --tiles "$WORK_DIR/valhalla_tiles" --geofabrik-index "$RUNNER_TEMP/index-v1.json" \
+            --build "$BUILD" --osm-timestamp "$OSM_TS" --valhalla 3.8.3 \
+            --base-url "https://github.com/${{ github.repository }}/releases/download/tiles-$BUILD" \
+            --buffer-km "${{ inputs.buffer_km }}" ${{ inputs.regions && format('--regions {0}', inputs.regions) || '' }} \
+            --out out/packages | tee out/cut.log
+          echo "BUILD=$BUILD" >> "$GITHUB_ENV"
+          echo "OSM_TS=$OSM_TS" >> "$GITHUB_ENV"
+
+      - name: Summary
+        if: always()
+        run: |
+          cat out/measure/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          { echo; echo '```'; cat out/cut.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Publish release
+        if: inputs.publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "tiles-$BUILD" out/packages/*.zip out/packages/index.json \
+            --repo "${{ github.repository }}" --latest \
+            --title "Region tiles $BUILD" \
+            --notes "Valhalla 3.8.3 tiles (level 2 only) from Geofabrik ${{ inputs.extract }}, OSM data as of $OSM_TS, cut into regions with a ${{ inputs.buffer_km }} km buffer. Contains OpenStreetMap data © OpenStreetMap contributors, ODbL."
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cut-${{ github.run_id }}
+          path: |
+            out/measure/
+            out/cut.log
+            out/packages/index.json
+          retention-days: 7
