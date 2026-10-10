@@ -148,6 +148,10 @@ def main():
              'attribution': ATTRIBUTION, 'regions': regions}
     (out / 'index.json').write_text(json.dumps(index, indent=1, ensure_ascii=False))
     unused = len(tiles) - len(covered)
+    for tid in sorted(set(tiles) - covered):
+        b = tile_box(tid).bounds
+        print(f'  unused tile {tid}: SW corner {b[1]:.2f},{b[0]:.2f}, '
+              f'{tiles[tid].stat().st_size / 1e6:.2f} MB')
     print(f'{len(regions)} regions, {len(covered)} of {len(tiles)} built tiles used '
           f'({unused} in no region), packages {sum(r["size"] for r in regions) / 1e9:.2f} GB')
 
