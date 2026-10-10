@@ -1,0 +1,61 @@
+name: Measure a tile build
+
+on:
+  workflow_dispatch:
+    inputs:
+      extract:
+        description: Geofabrik path, without -latest.osm.pbf
+        default: europe/united-kingdom/england/west-yorkshire
+      hierarchy:
+        description: Build hierarchy levels 0/1 and shortcuts
+        type: boolean
+        default: true
+      concurrency:
+        description: valhalla_build_tiles threads
+        default: "4"
+      keep_tiles:
+        description: Upload the tiles as an artifact (small extracts only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Standard runner only: free for public repos (4 CPUs, 16 GB RAM).
+    # Larger runners are charged even on public repos.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h / /mnt
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker image prune -af > /dev/null
+          df -h / /mnt
+
+      - name: Build and measure
+        env:
+          KEEP_TILES: ${{ inputs.keep_tiles }}
+        run: |
+          # Work on whichever filesystem has more room.
+          if [ "$(df --output=avail /mnt | tail -1)" -gt "$(df --output=avail / | tail -1)" ]; then
+            export WORK_DIR=/mnt/work
+          else
+            export WORK_DIR=$HOME/work
+          fi
+          bash scripts/measure_build.sh "${{ inputs.extract }}" "${{ inputs.hierarchy }}" "${{ inputs.concurrency }}" out
+
+      - name: Summary
+        if: always()
+        run: cat out/summary.md >> "$GITHUB_STEP_SUMMARY" || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: measure-${{ github.run_id }}
+          path: out/
+          retention-days: 7
